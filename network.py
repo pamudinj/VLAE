@@ -282,12 +282,43 @@ class ConvDecoder(nn.Module):
 
             z_req = z.detach().requires_grad_(True)
 
+            # Prefer functorch/vmap + jacrev for batched jacobian if available
+            use_functorch = False
+            try:
+                # functorch may be available as a separate package or under torch.func
+                try:
+                    from functorch import jacrev, vmap  # type: ignore
+                except Exception:
+                    # PyTorch >=2.0 has torch.func.jacrev and torch.vmap
+                    from torch.func import jacrev  # type: ignore
+                    from torch import vmap  # type: ignore
+                use_functorch = True
+            except Exception:
+                use_functorch = False
+
             W_out_chunks = []
             for start in range(0, batch, CHUNK):
                 end = min(batch, start + CHUNK)
                 zb = z_req[start:end]
 
-                # compute jacobian for each sample in this chunk
+                if use_functorch:
+                    # compute jacobian for the chunk in a batched, vectorized way
+                    try:
+                        # jacrev expects a function that maps a single sample to outputs
+                        # define single-sample function
+                        def f_single(z_single):
+                            return self._decode_mu(z_single.unsqueeze(0)).squeeze(0)
+
+                        # vmap over jacrev to get [chunk, image_size, z_dim]
+                        from functorch import vmap, jacrev  # type: ignore
+                        J_chunk = vmap(jacrev(f_single))(zb)
+                        W_out_chunks.append(J_chunk)
+                        continue
+                    except Exception:
+                        # Fall back to autograd per-sample within this chunk
+                        pass
+
+                # compute jacobian for each sample in this chunk using autograd.functional
                 for b in range(zb.size(0)):
                     def f(zb_single):
                         return self._decode_mu(zb_single.unsqueeze(0)).squeeze(0)
@@ -295,7 +326,17 @@ class ConvDecoder(nn.Module):
                     J = autograd_f.jacobian(f, zb[b])
                     W_out_chunks.append(J)
 
-            W_out = torch.stack(W_out_chunks, dim=0).to(z.device)  # [batch, image_size, z_dim]
+            # concatenate chunks
+            if len(W_out_chunks) > 0 and isinstance(W_out_chunks[0], torch.Tensor) and W_out_chunks[0].dim() == 3:
+                # W_out_chunks may be a list of tensors per chunk (if using functorch) or per-sample
+                if W_out_chunks[0].shape[0] == (end - start):
+                    # chunks were appended as tensors
+                    W_out = torch.cat(W_out_chunks, dim=0).to(z.device)
+                else:
+                    # appended per-sample tensors
+                    W_out = torch.stack(W_out_chunks, dim=0).to(z.device)
+            else:
+                W_out = torch.stack(W_out_chunks, dim=0).to(z.device)
 
             if self.output_dist == 'gaussian':
                 return distribution.DiagonalGaussian(mu_flat, self.logvar), W_out
