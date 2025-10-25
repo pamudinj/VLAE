@@ -274,23 +274,28 @@ class ConvDecoder(nn.Module):
         if compute_jacobian:
             # autograd.functional.jacobian per-sample (slow)
             batch = z.size(0)
-            # warn users when they request Jacobian on large batches
-            if batch > 16:
-                print(f"WARNING: compute_jacobian=True with batch={batch} is very slow for ConvDecoder."
-                      " Reduce --batch_size (e.g. to 8 or 16) or reduce n_update for ConvVLAE.")
+            # autograd.functional.jacobian per-sample (slow)
+            # If batch is large, compute Jacobians in smaller chunks to avoid extremely long stalls
+            CHUNK = 16
+            if batch > CHUNK:
+                print(f"WARNING: compute_jacobian=True with batch={batch} is slow; computing Jacobian in chunks of {CHUNK} to avoid long stall.")
+
             z_req = z.detach().requires_grad_(True)
 
-            W_out = []
-            for b in range(batch):
-                # function mapping z_b (size z_dim) -> mu_flat_b (size image_size)
-                def f(zb):
-                    return self._decode_mu(zb.unsqueeze(0)).squeeze(0)
+            W_out_chunks = []
+            for start in range(0, batch, CHUNK):
+                end = min(batch, start + CHUNK)
+                zb = z_req[start:end]
 
-                J = autograd_f.jacobian(f, z_req[b])
-                # J has shape [image_size, z_dim]
-                W_out.append(J)
+                # compute jacobian for each sample in this chunk
+                for b in range(zb.size(0)):
+                    def f(zb_single):
+                        return self._decode_mu(zb_single.unsqueeze(0)).squeeze(0)
 
-            W_out = torch.stack(W_out, dim=0).to(z.device)  # [batch, image_size, z_dim]
+                    J = autograd_f.jacobian(f, zb[b])
+                    W_out_chunks.append(J)
+
+            W_out = torch.stack(W_out_chunks, dim=0).to(z.device)  # [batch, image_size, z_dim]
 
             if self.output_dist == 'gaussian':
                 return distribution.DiagonalGaussian(mu_flat, self.logvar), W_out
