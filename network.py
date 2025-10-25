@@ -210,6 +210,12 @@ class ConvEncoder(nn.Module):
         self.activation = F.relu
 
     def forward(self, x):
+        # Accept either flattened input [batch, image_size] (as produced by
+        # dataset.preprocess) or image tensor [batch, C, H, W]. If flattened,
+        # reshape back to [B,C,H,W] using self.x_dim.
+        if x.dim() == 2:
+            batch = x.size(0)
+            x = x.view(batch, self.x_dim[0], self.x_dim[1], self.x_dim[2])
         # x: [batch, C, H, W]
         h = self.activation(self.conv1(x))
         h = self.activation(self.conv2(h))
