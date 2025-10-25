@@ -274,6 +274,10 @@ class ConvDecoder(nn.Module):
         if compute_jacobian:
             # autograd.functional.jacobian per-sample (slow)
             batch = z.size(0)
+            # warn users when they request Jacobian on large batches
+            if batch > 16:
+                print(f"WARNING: compute_jacobian=True with batch={batch} is very slow for ConvDecoder."
+                      " Reduce --batch_size (e.g. to 8 or 16) or reduce n_update for ConvVLAE.")
             z_req = z.detach().requires_grad_(True)
 
             W_out = []

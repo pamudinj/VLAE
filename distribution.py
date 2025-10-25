@@ -47,7 +47,12 @@ class Gaussian():
         # precision: [batch_size, z_dim, z_dim]
         self.precision = precision
         # TODO: get rid of the inverse for efficiency
-        self.L = torch.cholesky(torch.inverse(precision))
+        # Use torch.linalg.cholesky for newer PyTorch versions (replaces torch.cholesky)
+        try:
+            self.L = torch.linalg.cholesky(torch.inverse(precision))
+        except AttributeError:
+            # Fall back to legacy API if necessary
+            self.L = torch.cholesky(torch.inverse(precision))
         self.dim = self.mu.shape[1]
 
     def log_probability(self, x):
