@@ -483,3 +483,30 @@ class IAF(VAE):
             writer.add_image('generated',
                              vutils.make_grid(self.dataset.unpreprocess(sample).clamp(0, 1)),
                              epoch)
+
+
+class ConvVAE(VAE):
+    """VAE variant using convolutional encoder/decoder.
+    Usage: pass --model ConvVAE to run.py
+    """
+    def __init__(self, dataset, z_dim, output_dist, x_dim, enc_dim, dec_dim, **kwargs):
+        super().__init__(dataset=dataset, z_dim=z_dim, output_dist=output_dist,
+                         x_dim=x_dim, enc_dim=enc_dim, dec_dim=dec_dim, **kwargs)
+        # replace MLP encoder/decoder with conv variants
+        self.encoder = network.ConvEncoder(z_dim=z_dim, x_dim=x_dim, h_dim=enc_dim)
+        self.decoder = network.ConvDecoder(z_dim=z_dim, output_dist=output_dist, x_dim=x_dim, h_dim=dec_dim)
+
+
+class ConvVLAE(VLAE):
+    """VLAE variant using convolutional encoder/decoder.
+    Usage: pass --model ConvVLAE to run.py
+    """
+    def __init__(self, dataset, z_dim, output_dist, x_dim, enc_dim, dec_dim,
+                 n_update, update_lr, **kwargs):
+        super().__init__(dataset=dataset, z_dim=z_dim, output_dist=output_dist,
+                         x_dim=x_dim, enc_dim=enc_dim, dec_dim=dec_dim,
+                         n_update=n_update, update_lr=update_lr, **kwargs)
+        self.n_update = n_update
+        self.update_lr = update_lr
+        self.encoder = network.ConvEncoder(z_dim=z_dim, x_dim=x_dim, h_dim=enc_dim)
+        self.decoder = network.ConvDecoder(z_dim=z_dim, output_dist=output_dist, x_dim=x_dim, h_dim=dec_dim)

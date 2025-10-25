@@ -3,6 +3,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 import numpy as np
 import distribution
+import torch.autograd.functional as autograd_f
 
 
 class BaseEncoder(nn.Module):
@@ -184,3 +185,117 @@ class MADE(nn.Module):
         s = self.V_s(x) + self.c_s
 
         return m, s
+
+
+class ConvEncoder(nn.Module):
+    """Simple convolutional encoder that mirrors the MLP BaseEncoder.
+    Returns a DiagonalGaussian distribution and a hidden vector h.
+    """
+    def __init__(self, z_dim, x_dim, h_dim):
+        super().__init__()
+        self.z_dim = z_dim
+        self.x_dim = x_dim
+        self.h_dim = h_dim
+
+        c = x_dim[0]
+        # conv layers: 28x28 -> 14x14 -> 7x7
+        self.conv1 = nn.Conv2d(c, 32, kernel_size=4, stride=2, padding=1)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1)
+
+        conv_out_dim = 64 * (x_dim[1] // 4) * (x_dim[2] // 4)
+        self.fc1 = nn.Linear(conv_out_dim, h_dim)
+        self.fc2 = nn.Linear(h_dim, h_dim)
+        self.linear_mu = nn.Linear(h_dim, z_dim)
+        self.linear_logvar = nn.Linear(h_dim, z_dim)
+        self.activation = F.relu
+
+    def forward(self, x):
+        # x: [batch, C, H, W]
+        h = self.activation(self.conv1(x))
+        h = self.activation(self.conv2(h))
+        h_flat = h.view(h.size(0), -1)
+        h2 = self.activation(self.fc1(h_flat))
+        h3 = self.activation(self.fc2(h2))
+        mu = self.linear_mu(h3)
+        logvar = self.linear_logvar(h3)
+        return distribution.DiagonalGaussian(mu, logvar), h3
+
+
+class ConvDecoder(nn.Module):
+    """Convolutional decoder that mirrors BaseDecoder behaviour.
+    If compute_jacobian=True it computes the Jacobian of output mu wrt z
+    using autograd.functional.jacobian. This is slow and intended for
+    evaluation / VLAE use with small batches.
+    """
+    def __init__(self, z_dim, output_dist, x_dim, h_dim):
+        super().__init__()
+        self.z_dim = z_dim
+        self.output_dist = output_dist
+        self.x_dim = x_dim
+        self.h_dim = h_dim
+
+        # project z to a feature map of size 64 x (H/4) x (W/4)
+        conv_h = x_dim[1] // 4
+        conv_w = x_dim[2] // 4
+        conv_feat = 64 * conv_h * conv_w
+
+        self.fc0 = nn.Linear(z_dim, h_dim)
+        self.fc1 = nn.Linear(h_dim, conv_feat)
+        # transpose convs to upsample 7x7 -> 14x14 -> 28x28
+        self.deconv1 = nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1)
+        self.deconv2 = nn.ConvTranspose2d(32, x_dim[0], kernel_size=4, stride=2, padding=1)
+        self.activation = F.relu
+
+        if output_dist == 'gaussian':
+            self.logvar = nn.Parameter(torch.Tensor([0.0]))
+
+    def _decode_mu(self, z):
+        h = self.activation(self.fc0(z))
+        h = self.activation(self.fc1(h))
+        # reshape to [batch, 64, H/4, W/4]
+        batch = z.size(0)
+        conv_h = self.x_dim[1] // 4
+        conv_w = self.x_dim[2] // 4
+        h_map = h.view(batch, 64, conv_h, conv_w)
+        h = self.activation(self.deconv1(h_map))
+        mu = self.deconv2(h)
+        mu_flat = mu.view(batch, -1)
+        return mu_flat
+
+    def forward(self, z, compute_jacobian=False):
+        mu_flat = self._decode_mu(z)
+
+        if compute_jacobian:
+            # autograd.functional.jacobian per-sample (slow)
+            batch = z.size(0)
+            z_req = z.detach().requires_grad_(True)
+
+            W_out = []
+            for b in range(batch):
+                # function mapping z_b (size z_dim) -> mu_flat_b (size image_size)
+                def f(zb):
+                    return self._decode_mu(zb.unsqueeze(0)).squeeze(0)
+
+                J = autograd_f.jacobian(f, z_req[b])
+                # J has shape [image_size, z_dim]
+                W_out.append(J)
+
+            W_out = torch.stack(W_out, dim=0).to(z.device)  # [batch, image_size, z_dim]
+
+            if self.output_dist == 'gaussian':
+                return distribution.DiagonalGaussian(mu_flat, self.logvar), W_out
+            elif self.output_dist == 'bernoulli':
+                mu = torch.sigmoid(mu_flat)
+                mu_clip = torch.clamp(mu, min=1e-5, max=1.0 - 1e-5)
+                self.logvar = -torch.log((mu_clip * (1 - mu_clip)) + 1e-5)
+                return distribution.Bernoulli(mu), W_out
+            else:
+                raise ValueError
+        else:
+            if self.output_dist == 'gaussian':
+                return distribution.DiagonalGaussian(mu_flat, self.logvar)
+            elif self.output_dist == 'bernoulli':
+                mu = torch.sigmoid(mu_flat)
+                return distribution.Bernoulli(mu)
+            else:
+                raise ValueError
