@@ -71,6 +71,16 @@ class Experiment():
         os.makedirs(self.save_dir, exist_ok=True)
         self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate,
                                     weight_decay=weight_decay)
+        # learning rate scheduler: reduce LR on plateau (uses test loss)
+        # default: halve LR when test loss doesn't improve for 5 epochs
+        try:
+            self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer,
+                                                                  mode='min',
+                                                                  factor=0.5,
+                                                                  patience=5)
+        except Exception:
+            # older PyTorch versions may have different scheduler APIs; ignore if unavailable
+            self.scheduler = None
 
         self.epoch = 1
         self.best_epoch = None
@@ -143,6 +153,12 @@ class Experiment():
         epoch_loss = train_loss / len(train_loader.dataset)
         print(colorful.bold_green('====> Epoch: {} Average loss: {:.4f} Duration(sec): {}'.format(self.epoch, epoch_loss, duration)).styled_string)
         self.writer.add_scalar('train/loss', epoch_loss, self.epoch)
+        # log current learning rate
+        try:
+            lr = self.optimizer.param_groups[0]['lr']
+            self.writer.add_scalar('train/lr', lr, self.epoch)
+        except Exception:
+            pass
         self.model.write_summary(data, self.writer, self.epoch)
 
     def test(self):
@@ -164,6 +180,21 @@ class Experiment():
 
         print(colorful.bold_red('====> Test set loss: {:.4f}'.format(test_loss)).styled_string)
         self.writer.add_scalar('test/loss', test_loss, self.epoch)
+        # log LR at test time
+        try:
+            lr = self.optimizer.param_groups[0]['lr']
+            self.writer.add_scalar('test/lr', lr, self.epoch)
+        except Exception:
+            lr = None
+
+        # step the scheduler based on validation/test loss if available
+        if getattr(self, 'scheduler', None) is not None:
+            try:
+                # ReduceLROnPlateau expects the metric (test loss) to decide
+                self.scheduler.step(test_loss)
+            except Exception:
+                # if stepping fails for some reason, skip silently
+                pass
 
     def importance_sample(self, checkpoint):
         self.model.load_state_dict(torch.load(checkpoint))
